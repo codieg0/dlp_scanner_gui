@@ -15,7 +15,7 @@ This tool scans emails and attachments for sensitive information (SSN, credit ca
 ```powershell
 $ShortcutPath = "$env:PUBLIC\Desktop\\DLP-Scanner.lnk"; $TargetPath = "C:\Users\$env:USERNAME\Desktop\DLP\dist\dlp-gui.exe"; $WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut($ShortcutPath); $Shortcut.TargetPath = $TargetPath; $Shortcut.Save()
 ``` -->
-<!-- ## How to Use (Python Version)
+## How to Use (Python Version)
 
 1. Download and unzip the folder containing:
     - `dlp-gui.py`
@@ -26,7 +26,7 @@ $ShortcutPath = "$env:PUBLIC\Desktop\\DLP-Scanner.lnk"; $TargetPath = "C:\Users\
     ```powershell
     py.exe -m pip install -r requirements.txt
     ```
- -->
+    
 ## Dictionary File
 
 - You can select all or specific categories in the GUI.
