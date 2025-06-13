@@ -1,0 +1,352 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog
+from tkinter import ttk
+from tkinter import PhotoImage
+import pyperclip
+import json
+import re
+import os
+import PyPDF2
+
+# --- Load Dictionary Terms from json file ---
+def load_dlp_dict(json_path):
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    dlp_dict = {}
+    for category, terms in data.items():
+        for term in terms:
+            dlp_dict[term.strip()] = category
+    return dlp_dict
+
+# --- Dictionary-based term search ---
+def find_dlp_terms(text, dlp_dict, selected_terms=None):
+    found = []
+    for term, category in dlp_dict.items():
+        if selected_terms and term not in selected_terms:
+            continue
+        pattern = re.compile(re.escape(term), re.IGNORECASE)
+        if pattern.search(text):
+            found.append((term, category))
+    return found
+
+# --- Enhanced SSN detection ---
+def find_ssn(text):
+    formatted = re.findall(r'\b(?!666|000|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b', text)
+    unformatted = re.findall(r'\b(?!666|000|9\d{2})\d{9}\b', text)
+    excluded_range = set(str(i) for i in range(87654320, 87654330))
+    filtered_unformatted = [ssn for ssn in unformatted if ssn not in excluded_range]
+    return list(set(formatted + filtered_unformatted))
+
+# --- Luhn Algorithm for Credit Cards ---
+def luhn_check(card_number):
+    digits = [int(d) for d in card_number if d.isdigit()]
+    checksum = 0
+    reverse_digits = digits[::-1]
+    for i, d in enumerate(reverse_digits):
+        if i % 2 == 1:
+            doubled = d * 2
+            checksum += doubled - 9 if doubled > 9 else doubled
+        else:
+            checksum += d
+    return checksum % 10 == 0
+
+def find_credit_cards(text):
+    cc_patterns = [
+        r'\b3[47]\d{13}\b',                     # Amex
+        r'\b3(0[0-5]|[68]\d)\d{11}\b',          # Diners Club
+        r'\b6011\d{12}\b',                      # Discover
+        r'\b5[1-5]\d{14}\b',                    # MasterCard
+        r'\b62\d{14}\b',                        # Union Pay
+        r'\b4\d{12}(\d{3})?\b'                  # Visa
+    ]
+    found = set()
+    for pattern in cc_patterns:
+        for match in re.findall(pattern, text):
+            match_str = ''.join(match) if isinstance(match, tuple) else match
+            if luhn_check(match_str):
+                found.add(match_str)
+    return list(found)
+
+# --- Basic US Driver License detection ---
+def find_us_driver_license(text):
+    patterns = [
+        r'\b\d{5,13}\b',
+        r'\b[A-Z]{1,2}\d{5,13}\b'
+    ]
+    found = set()
+    for pattern in patterns:
+        found.update(re.findall(pattern, text))
+    return list(found)
+
+# --- File text extraction ---
+def extract_text_from_file(filepath):
+    ext = os.path.splitext(filepath)[1].lower()
+    try:
+        if ext == ".txt":
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+        elif ext == ".pdf":
+            with open(filepath, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                return "\n".join(page.extract_text() or "" for page in reader.pages)
+        elif ext == ".docx":
+            from docx import Document
+            doc = Document(filepath)
+            return "\n".join([para.text for para in doc.paragraphs])
+        elif ext == ".eml":
+            from email import policy
+            from email.parser import BytesParser
+            with open(filepath, "rb") as f:
+                msg = BytesParser(policy=policy.default).parse(f)
+            subject = msg['subject'] or ""
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        body += part.get_content()
+            else:
+                body = msg.get_content()
+            return f"{subject}\n{body}"
+        else:
+            return ""
+    except Exception as e:
+        return f"[Error reading {filepath}: {e}]"
+
+# --- Main scan logic ---
+def scan_files(files, scan_options, dlp_dict_path=None, dict_terms=None):
+    results = []
+    dlp_dict = load_dlp_dict(dlp_dict_path) if dlp_dict_path else {}
+    for f in files:
+        text = extract_text_from_file(f)
+        fname = os.path.basename(f)
+        if not text:
+            results.append(f"{fname}: [No text extracted]")
+            continue
+        matches = []
+        if "SSN" in scan_options:
+            for ssn in find_ssn(text):
+                matches.append(f"{fname}: {ssn}  [category: SSN]")
+        if "Credit Card" in scan_options:
+            for cc in find_credit_cards(text):
+                matches.append(f"{fname}: {cc}  [category: Credit Card]")
+        if "US Driver License" in scan_options:
+            for lic in find_us_driver_license(text):
+                matches.append(f"{fname}: {lic}  [category: US Driver License]")
+        if "Dictionary" in scan_options and dlp_dict:
+            dict_matches = find_dlp_terms(text, dlp_dict, dict_terms if dict_terms and dict_terms != ["ALL"] else None)
+            for term, category in dict_matches:
+                matches.append(f"{fname}: {term}  [category: {category}]")
+        if matches:
+            results.extend(matches)
+        else:
+            results.append(f"{fname}: [No matches found]")
+    return "\n".join(results)
+
+# --- GUI ---
+root = tk.Tk()
+root.title("DLP Scanner GUI")
+root.iconbitmap(os.path.join(os.path.dirname(__file__), 'icon.ico'))
+default_font = ("Segoe UI", 12)
+root.option_add("*Font", default_font)
+root.configure(bg="#f4f6fb")
+
+# Set the icon
+icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.ico')
+try:
+    root.iconbitmap(icon_path)
+except Exception as e:
+    print(f"Could not set icon: {e}")
+
+# Store a mapping from displayed name to full path
+file_display_to_path = {}
+
+# Tooltip helper
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        widget.bind("<Enter>", self.show_tip)
+        widget.bind("<Leave>", self.hide_tip)
+    def show_tip(self, event=None):
+        if self.tipwindow or not self.text:
+            return
+        x, y, cx, cy = self.widget.bbox("insert")
+        x = x + self.widget.winfo_rootx() + 25
+        y = y + self.widget.winfo_rooty() + 20
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
+                         background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                         font=("Segoe UI", 10))
+        label.pack(ipadx=6)
+    def hide_tip(self, event=None):
+        tw = self.tipwindow
+        self.tipwindow = None
+        if tw:
+            tw.destroy()
+
+def select_files():
+    global file_display_to_path
+    files = filedialog.askopenfilenames(title="Select files to scan")
+    file_list.delete(0, tk.END)
+    file_display_to_path = {}
+    for f in files:
+        fname = os.path.basename(f)
+        file_list.insert(tk.END, fname)
+        file_display_to_path[fname] = f
+
+def select_dict_file():
+    path = filedialog.askopenfilename(title="Select dictionary JSON file", filetypes=[("JSON files", "*.json")])
+    dict_path_var.set(path)
+
+# Add a logo/banner (optional: replace 'logo.png' with your image file)
+try:
+    logo_img = PhotoImage(file="logo.png")
+    logo_label = tk.Label(root, image=logo_img, bg="#f4f6fb")
+    logo_label.pack(pady=(10, 0))
+except Exception:
+    logo_label = tk.Label(root, text="DLP Scanner", font=("Segoe UI", 18, "bold"), bg="#f4f6fb", fg="#2a3b8f")
+    logo_label.pack(pady=(10, 0))
+
+container = ttk.Frame(root, style="Card.TFrame")
+container.pack(expand=True, fill="both")
+
+frame = ttk.Frame(container, padding=20, style="Card.TFrame")
+frame.pack(anchor="center")
+
+style = ttk.Style()
+style.configure("Card.TFrame", background="#f4f6fb")
+style.configure("TButton", padding=6)
+style.configure("TCheckbutton", background="#f4f6fb")
+style.configure("TLabel", background="#f4f6fb")
+
+# Section heading
+ttk.Label(frame, text="Attachments", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, columnspan=4, pady=(0, 5))
+
+select_btn = ttk.Button(frame, text="Select Files", command=select_files)
+select_btn.grid(row=1, column=0, sticky="ew", pady=(0, 8), columnspan=4)
+ToolTip(select_btn, "Select one or more files to scan.")
+
+file_list = tk.Listbox(frame, width=60, height=5, borderwidth=2, relief="groove", highlightthickness=0)
+file_list.grid(row=2, column=0, columnspan=4, pady=(0, 12), sticky="ew")
+
+# Section heading
+ttk.Label(frame, text="Scan Options", font=("Segoe UI", 13, "bold")).grid(row=3, column=0, columnspan=4, pady=(0, 5))
+
+var_ssn = tk.BooleanVar(value=False)
+var_cc = tk.BooleanVar(value=False)
+var_dl = tk.BooleanVar(value=False)
+var_dict = tk.BooleanVar(value=False)
+var_dict_specific = tk.BooleanVar(value=False)
+dict_path_var = tk.StringVar(value="")
+
+ssn_cb = ttk.Checkbutton(frame, text="SSN", variable=var_ssn)
+ssn_cb.grid(row=4, column=0, sticky="ew", padx=2)
+ToolTip(ssn_cb, "Scan for Social Security Numbers")
+cc_cb = ttk.Checkbutton(frame, text="Credit Card", variable=var_cc)
+cc_cb.grid(row=4, column=1, sticky="ew", padx=2)
+ToolTip(cc_cb, "Scan for Credit Card numbers")
+dl_cb = ttk.Checkbutton(frame, text="US Driver License", variable=var_dl)
+dl_cb.grid(row=4, column=2, sticky="ew", padx=2)
+ToolTip(dl_cb, "Scan for US Driver License numbers")
+dict_cb = ttk.Checkbutton(frame, text="Dictionary", variable=var_dict)
+dict_cb.grid(row=4, column=3, sticky="ew", padx=2)
+ToolTip(dict_cb, "Scan for dictionary terms from your JSON file")
+specific_cb = ttk.Checkbutton(frame, text="Specific Dict Terms", variable=var_dict_specific)
+specific_cb.grid(row=5, column=3, sticky="ew", padx=2)
+ToolTip(specific_cb, "Select specific dictionary categories to scan")
+
+select_dict_btn = ttk.Button(frame, text="Select Dictionary JSON", command=select_dict_file)
+select_dict_btn.grid(row=5, column=0, sticky="ew", pady=5, columnspan=1)
+ToolTip(select_dict_btn, "Choose your dictionary JSON file")
+dict_entry = ttk.Entry(frame, textvariable=dict_path_var, width=40)
+dict_entry.grid(row=5, column=1, columnspan=2, sticky="ew", padx=2)
+
+# Progress bar
+progress = ttk.Progressbar(frame, mode="indeterminate")
+progress.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+progress.grid_remove()
+
+def run_scan():
+    selected_names = file_list.get(0, tk.END)
+    files = [file_display_to_path[name] for name in selected_names]
+    if not files:
+        messagebox.showwarning("No files", "Please select files to scan.")
+        return
+    scan_options = []
+    if var_ssn.get(): scan_options.append("SSN")
+    if var_cc.get(): scan_options.append("Credit Card")
+    if var_dl.get(): scan_options.append("US Driver License")
+    dict_terms = None
+    dlp_dict_path = dict_path_var.get() if var_dict.get() else None
+    if var_dict.get():
+        scan_options.append("Dictionary")
+        if not dlp_dict_path:
+            messagebox.showwarning("No dictionary", "Please select a dictionary JSON file.")
+            return
+        if var_dict_specific.get():
+            dlp_dict = load_dlp_dict(dlp_dict_path)
+            with open(dlp_dict_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            all_categories = sorted(data.keys())
+            cat_win = tk.Toplevel(root)
+            cat_win.title("Select Dictionary Categories")
+            cat_win.geometry("400x400")
+            lb_frame = ttk.Frame(cat_win)
+            lb_frame.pack(fill="both", expand=True, pady=10)
+            lb = tk.Listbox(lb_frame, selectmode=tk.MULTIPLE, width=50, height=8)
+            lb.pack(side="left", fill="both", expand=True)
+            scrollbar = ttk.Scrollbar(lb_frame, orient="vertical", command=lb.yview)
+            scrollbar.pack(side="right", fill="y")
+            lb.config(yscrollcommand=scrollbar.set)
+            for c in all_categories:
+                lb.insert(tk.END, c)
+            selected_categories = []
+            def set_categories():
+                selected = [all_categories[i] for i in lb.curselection()]
+                nonlocal dict_terms
+                dict_terms = []
+                for cat in selected:
+                    dict_terms.extend(data[cat])
+                cat_win.destroy()
+            ttk.Button(cat_win, text="OK", command=set_categories).pack(pady=8)
+            root.wait_window(cat_win)
+            if not dict_terms:
+                messagebox.showwarning("No categories", "No dictionary categories selected.")
+                return
+    # Show progress bar
+    progress.grid()
+    progress.start()
+    root.update_idletasks()
+    results = scan_files(files, scan_options, dlp_dict_path, dict_terms)
+    progress.stop()
+    progress.grid_remove()
+    set_output_text(results)
+    pyperclip.copy(results)
+    messagebox.showinfo("Copied", "Results copied to clipboard.")
+
+run_btn = ttk.Button(frame, text="Run Scan", command=run_scan)
+run_btn.grid(row=7, column=0, columnspan=4, pady=12, sticky="ew")
+ToolTip(run_btn, "Start scanning the selected files")
+
+output_label = ttk.Label(frame, text="Results:")
+output_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+
+output_text = tk.Text(frame, width=80, height=12, state="disabled", bg="#f8fafc", relief="flat", borderwidth=2)
+output_text.grid(row=9, column=0, columnspan=4, pady=5, sticky="ew")
+
+# Make columns expand equally for centering
+for i in range(4):
+    frame.grid_columnconfigure(i, weight=1)
+
+# When inserting output, temporarily enable, insert, then disable again
+
+def set_output_text(text):
+    output_text.config(state="normal")
+    output_text.delete(1.0, tk.END)
+    output_text.insert(tk.END, text)
+    output_text.config(state="disabled")
+
+root.mainloop()
