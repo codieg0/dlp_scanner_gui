@@ -1,7 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog
-from tkinter import ttk
-from tkinter import PhotoImage
+from tkinter import filedialog, messagebox, ttk, PhotoImage
 import pyperclip
 import json
 import re
@@ -84,68 +82,107 @@ def extract_text_from_file(filepath):
     try:
         if ext == ".txt":
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
+                return [("body", f.read())]
         elif ext == ".pdf":
             with open(filepath, "rb") as f:
+                import PyPDF2
                 reader = PyPDF2.PdfReader(f)
-                return "\n".join(page.extract_text() or "" for page in reader.pages)
+                return [("body", "\n".join(page.extract_text() or "" for page in reader.pages))]
         elif ext == ".docx":
             from docx import Document
             doc = Document(filepath)
-            return "\n".join([para.text for para in doc.paragraphs])
+            return [("body", "\n".join([para.text for para in doc.paragraphs]))]
         elif ext == ".eml":
             from email import policy
             from email.parser import BytesParser
+            import tempfile
             with open(filepath, "rb") as f:
                 msg = BytesParser(policy=policy.default).parse(f)
             subject = msg['subject'] or ""
             body = ""
+            sources = []
             if msg.is_multipart():
                 for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
+                    ctype = part.get_content_type()
+                    if ctype == "text/plain":
                         body += part.get_content()
+                    elif part.get_filename():
+                        filename = part.get_filename()
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            ext = os.path.splitext(filename)[1].lower()
+                            if ext in [".txt", ".pdf", ".docx"]:
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                                    tmp.write(payload)
+                                    tmp_path = tmp.name
+                                # Recursively extract from attachment
+                                for src, txt in extract_text_from_file(tmp_path):
+                                    sources.append((f"attachment: {filename}", txt))
+                                os.unlink(tmp_path)
             else:
                 body = msg.get_content()
-            return f"{subject}\n{body}"
+            sources.insert(0, ("body", f"{subject}\n{body}"))
+            return sources
         else:
-            return ""
+            return []
     except Exception as e:
-        return f"[Error reading {filepath}: {e}]"
+        return [("body", f"[Error reading {filepath}: {e}]")]
 
 # --- Main scan logic ---
 def scan_files(files, scan_options, dlp_dict_path=None, dict_terms=None):
-    results = []
+    results_by_file = {}
     dlp_dict = load_dlp_dict(dlp_dict_path) if dlp_dict_path else {}
     for f in files:
-        text = extract_text_from_file(f)
         fname = os.path.basename(f)
-        if not text:
-            results.append(f"{fname}: [No text extracted]")
-            continue
         matches = []
-        if "SSN" in scan_options:
-            for ssn in find_ssn(text):
-                matches.append(f"{fname}: {ssn}  [category: SSN]")
-        if "Credit Card" in scan_options:
-            for cc in find_credit_cards(text):
-                matches.append(f"{fname}: {cc}  [category: Credit Card]")
-        if "US Driver License" in scan_options:
-            for lic in find_us_driver_license(text):
-                matches.append(f"{fname}: {lic}  [category: US Driver License]")
-        if "Dictionary" in scan_options and dlp_dict:
-            dict_matches = find_dlp_terms(text, dlp_dict, dict_terms if dict_terms and dict_terms != ["ALL"] else None)
-            for term, category in dict_matches:
-                matches.append(f"{fname}: {term}  [category: {category}]")
-        if matches:
-            results.extend(matches)
+        sources = extract_text_from_file(f)
+        if not sources:
+            matches.append("  [No text extracted]")
         else:
-            results.append(f"{fname}: [No matches found]")
-    return "\n".join(results)
+            for source, text in sources:
+                found = []
+                if "SSN" in scan_options:
+                    for ssn in find_ssn(text):
+                        found.append(f"• {ssn}   [SSN]")
+                if "Credit Card" in scan_options:
+                    for cc in find_credit_cards(text):
+                        found.append(f"• {cc}   [Credit Card]")
+                if "US Driver License" in scan_options:
+                    for lic in find_us_driver_license(text):
+                        found.append(f"• {lic}   [US Driver License]")
+                if "Dictionary" in scan_options and dlp_dict:
+                    dict_matches = find_dlp_terms(text, dlp_dict, dict_terms if dict_terms and dict_terms != ["ALL"] else None)
+                    for term, category in dict_matches:
+                        found.append(f"• {term}   [{category}]")
+                if found:
+                    if source == "body":
+                        matches.extend([f"  {m} (in email body)" for m in found])
+                    else:
+                        matches.extend([f"  {m} (in {source})" for m in found])
+        if not matches:
+            matches.append("  [No matches found]")
+        results_by_file.setdefault(fname, []).extend(matches)
+    # Build the pretty output
+    pretty_lines = []
+    for fname, matches in results_by_file.items():
+        pretty_lines.append(f"{fname}")
+        pretty_lines.extend(matches)
+        pretty_lines.append("")  # Blank line between files
+    return "\n".join(pretty_lines).strip()
 
 # --- GUI ---
 root = tk.Tk()
 root.title("DLP Scanner GUI")
 root.iconbitmap(os.path.join(os.path.dirname(__file__), 'icon.ico'))
+
+# Show privacy warning popup (English & Spanish)
+messagebox.showwarning(
+    "Privacy Warning / Advertencia de Privacidad",
+    "⚠️ This tool scans sensitive data.\nPlease keep the output private and secure.\n\n"
+    "⚠️ Esta herramienta analiza datos sensibles.\nPor favor, mantenga el contenido en privado."
+)
+
+# Set default font and background color
 default_font = ("Segoe UI", 12)
 root.option_add("*Font", default_font)
 root.configure(bg="#f4f6fb")
@@ -159,33 +196,6 @@ except Exception as e:
 
 # Store a mapping from displayed name to full path
 file_display_to_path = {}
-
-# Tooltip helper
-class ToolTip:
-    def __init__(self, widget, text):
-        self.widget = widget
-        self.text = text
-        self.tipwindow = None
-        widget.bind("<Enter>", self.show_tip)
-        widget.bind("<Leave>", self.hide_tip)
-    def show_tip(self, event=None):
-        if self.tipwindow or not self.text:
-            return
-        x, y, cx, cy = self.widget.bbox("insert")
-        x = x + self.widget.winfo_rootx() + 25
-        y = y + self.widget.winfo_rooty() + 20
-        self.tipwindow = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
-        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
-                         background="#ffffe0", relief=tk.SOLID, borderwidth=1,
-                         font=("Segoe UI", 10))
-        label.pack(ipadx=6)
-    def hide_tip(self, event=None):
-        tw = self.tipwindow
-        self.tipwindow = None
-        if tw:
-            tw.destroy()
 
 def select_files():
     global file_display_to_path
@@ -227,7 +237,6 @@ ttk.Label(frame, text="Attachments", font=("Segoe UI", 13, "bold")).grid(row=0, 
 
 select_btn = ttk.Button(frame, text="Select Files", command=select_files)
 select_btn.grid(row=1, column=0, sticky="ew", pady=(0, 8), columnspan=4)
-ToolTip(select_btn, "Select one or more files to scan.")
 
 file_list = tk.Listbox(frame, width=60, height=5, borderwidth=2, relief="groove", highlightthickness=0)
 file_list.grid(row=2, column=0, columnspan=4, pady=(0, 12), sticky="ew")
@@ -244,23 +253,17 @@ dict_path_var = tk.StringVar(value="")
 
 ssn_cb = ttk.Checkbutton(frame, text="SSN", variable=var_ssn)
 ssn_cb.grid(row=4, column=0, sticky="ew", padx=2)
-ToolTip(ssn_cb, "Scan for Social Security Numbers")
 cc_cb = ttk.Checkbutton(frame, text="Credit Card", variable=var_cc)
 cc_cb.grid(row=4, column=1, sticky="ew", padx=2)
-ToolTip(cc_cb, "Scan for Credit Card numbers")
 dl_cb = ttk.Checkbutton(frame, text="US Driver License", variable=var_dl)
 dl_cb.grid(row=4, column=2, sticky="ew", padx=2)
-ToolTip(dl_cb, "Scan for US Driver License numbers")
 dict_cb = ttk.Checkbutton(frame, text="Dictionary", variable=var_dict)
 dict_cb.grid(row=4, column=3, sticky="ew", padx=2)
-ToolTip(dict_cb, "Scan for dictionary terms from your JSON file")
 specific_cb = ttk.Checkbutton(frame, text="Specific Dict Terms", variable=var_dict_specific)
 specific_cb.grid(row=5, column=3, sticky="ew", padx=2)
-ToolTip(specific_cb, "Select specific dictionary categories to scan")
 
 select_dict_btn = ttk.Button(frame, text="Select Dictionary JSON", command=select_dict_file)
 select_dict_btn.grid(row=5, column=0, sticky="ew", pady=5, columnspan=1)
-ToolTip(select_dict_btn, "Choose your dictionary JSON file")
 dict_entry = ttk.Entry(frame, textvariable=dict_path_var, width=40)
 dict_entry.grid(row=5, column=1, columnspan=2, sticky="ew", padx=2)
 
@@ -329,7 +332,6 @@ def run_scan():
 
 run_btn = ttk.Button(frame, text="Run Scan", command=run_scan)
 run_btn.grid(row=7, column=0, columnspan=4, pady=12, sticky="ew")
-ToolTip(run_btn, "Start scanning the selected files")
 
 output_label = ttk.Label(frame, text="Results:")
 output_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
@@ -340,8 +342,6 @@ output_text.grid(row=9, column=0, columnspan=4, pady=5, sticky="ew")
 # Make columns expand equally for centering
 for i in range(4):
     frame.grid_columnconfigure(i, weight=1)
-
-# When inserting output, temporarily enable, insert, then disable again
 
 def set_output_text(text):
     output_text.config(state="normal")
