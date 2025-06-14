@@ -26,6 +26,10 @@ $ShortcutPath = "$env:PUBLIC\Desktop\\DLP-Scanner.lnk"; $TargetPath = "C:\Users\
     ```powershell
     py.exe -m pip install -r requirements.txt
     ```
+4. Getting the exe file
+    ```powershell
+    pyinstaller --onefile --windowed dlp-gui.py --add-data "icon.ico;."
+    ```
     
 ## Dictionary File
 
