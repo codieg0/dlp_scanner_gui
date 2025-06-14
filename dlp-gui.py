@@ -85,7 +85,6 @@ def extract_text_from_file(filepath):
                 return [("body", f.read())]
         elif ext == ".pdf":
             with open(filepath, "rb") as f:
-                import PyPDF2
                 reader = PyPDF2.PdfReader(f)
                 return [("body", "\n".join(page.extract_text() or "" for page in reader.pages))]
         elif ext == ".docx":
@@ -128,7 +127,7 @@ def extract_text_from_file(filepath):
     except Exception as e:
         return [("body", f"[Error reading {filepath}: {e}]")]
 
-# --- Main scan logic ---
+# --- Main scan logic with source grouping ---
 def scan_files(files, scan_options, dlp_dict_path=None, dict_terms=None):
     results_by_file = {}
     dlp_dict = load_dlp_dict(dlp_dict_path) if dlp_dict_path else {}
@@ -137,38 +136,26 @@ def scan_files(files, scan_options, dlp_dict_path=None, dict_terms=None):
         matches = []
         sources = extract_text_from_file(f)
         if not sources:
-            matches.append("  [No text extracted]")
+            matches.append(("no_text", "  [No text extracted]", "body"))
         else:
             for source, text in sources:
-                found = []
                 if "SSN" in scan_options:
                     for ssn in find_ssn(text):
-                        found.append(f"• {ssn}   [SSN]")
+                        matches.append(("ssn", f"• {ssn}   [SSN]", source))
                 if "Credit Card" in scan_options:
                     for cc in find_credit_cards(text):
-                        found.append(f"• {cc}   [Credit Card]")
+                        matches.append(("creditcard", f"• {cc}   [Credit Card]", source))
                 if "US Driver License" in scan_options:
                     for lic in find_us_driver_license(text):
-                        found.append(f"• {lic}   [US Driver License]")
+                        matches.append(("usdl", f"• {lic}   [US Driver License]", source))
                 if "Dictionary" in scan_options and dlp_dict:
                     dict_matches = find_dlp_terms(text, dlp_dict, dict_terms if dict_terms and dict_terms != ["ALL"] else None)
                     for term, category in dict_matches:
-                        found.append(f"• {term}   [{category}]")
-                if found:
-                    if source == "body":
-                        matches.extend([f"  {m} (in email body)" for m in found])
-                    else:
-                        matches.extend([f"  {m} (in {source})" for m in found])
+                        matches.append(("category", f"• {term}   [{category}]", source))
         if not matches:
-            matches.append("  [No matches found]")
+            matches.append(("no_match", "  [No matches found]", "body"))
         results_by_file.setdefault(fname, []).extend(matches)
-    # Build the pretty output
-    pretty_lines = []
-    for fname, matches in results_by_file.items():
-        pretty_lines.append(f"{fname}")
-        pretty_lines.extend(matches)
-        pretty_lines.append("")  # Blank line between files
-    return "\n".join(pretty_lines).strip()
+    return results_by_file
 
 # --- GUI ---
 root = tk.Tk()
@@ -272,6 +259,50 @@ progress = ttk.Progressbar(frame, mode="indeterminate")
 progress.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
 progress.grid_remove()
 
+# --- Output Text Widget with Color Tags ---
+output_label = ttk.Label(frame, text="Results:")
+output_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+
+output_text = tk.Text(frame, width=80, height=12, state="disabled", bg="#f8fafc", relief="flat", borderwidth=2)
+output_text.grid(row=9, column=0, columnspan=4, pady=5, sticky="ew")
+
+# Configure color tags
+output_text.tag_config("filename", foreground="#2a3b8f", font=("Segoe UI", 11, "bold"))
+output_text.tag_config("ssn", foreground="#e67e22")
+output_text.tag_config("creditcard", foreground="#27ae60")
+output_text.tag_config("usdl", foreground="#2980b9")
+output_text.tag_config("category", foreground="#8e44ad")
+output_text.tag_config("source", foreground="#888888", font=("Segoe UI", 10, "italic"))
+output_text.tag_config("no_text", foreground="#c0392b")
+output_text.tag_config("no_match", foreground="#888888")
+
+def set_output_text(results_by_file):
+    output_text.config(state="normal")
+    output_text.delete(1.0, tk.END)
+    for fname, matches in results_by_file.items():
+        output_text.insert(tk.END, f"{fname}\n", "filename")
+        # Organize matches by source
+        body_matches = []
+        attachments = {}
+        for tag, m, source in matches:
+            if source == "body":
+                body_matches.append((tag, m))
+            elif source.startswith("attachment: "):
+                att_name = source.replace("attachment: ", "")
+                attachments.setdefault(att_name, []).append((tag, m))
+        # Body/subject
+        if body_matches:
+            output_text.insert(tk.END, "\tBody/subject\n", "source")
+            for tag, m in body_matches:
+                output_text.insert(tk.END, f"\t\t{m}\n", tag)
+        # Attachments
+        for att_name, att_matches in attachments.items():
+            output_text.insert(tk.END, f"\tAttachment - {att_name}\n", "source")
+            for tag, m in att_matches:
+                output_text.insert(tk.END, f"\t\t{m}\n", tag)
+        output_text.insert(tk.END, "\n")
+    output_text.config(state="disabled")
+
 def run_scan():
     selected_names = file_list.get(0, tk.END)
     files = [file_display_to_path[name] for name in selected_names]
@@ -323,30 +354,40 @@ def run_scan():
     progress.grid()
     progress.start()
     root.update_idletasks()
-    results = scan_files(files, scan_options, dlp_dict_path, dict_terms)
+    results_by_file = scan_files(files, scan_options, dlp_dict_path, dict_terms)
     progress.stop()
     progress.grid_remove()
-    set_output_text(results)
-    pyperclip.copy(results)
+    set_output_text(results_by_file)
+    # Copy plain text to clipboard (without color)
+    plain_lines = []
+    for fname, matches in results_by_file.items():
+        plain_lines.append(fname)
+        # Organize matches by source for clipboard as well
+        body_matches = []
+        attachments = {}
+        for tag, m, source in matches:
+            if source == "body":
+                body_matches.append(m)
+            elif source.startswith("attachment: "):
+                att_name = source.replace("attachment: ", "")
+                attachments.setdefault(att_name, []).append(m)
+        if body_matches:
+            plain_lines.append("\tBody/subject")
+            for m in body_matches:
+                plain_lines.append(f"\t\t{m}")
+        for att_name, att_matches in attachments.items():
+            plain_lines.append(f"\tAttachment - {att_name}")
+            for m in att_matches:
+                plain_lines.append(f"\t\t{m}")
+        plain_lines.append("")
+    pyperclip.copy("\n".join(plain_lines).strip())
     messagebox.showinfo("Copied", "Results copied to clipboard.")
 
 run_btn = ttk.Button(frame, text="Run Scan", command=run_scan)
 run_btn.grid(row=7, column=0, columnspan=4, pady=12, sticky="ew")
 
-output_label = ttk.Label(frame, text="Results:")
-output_label.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
-
-output_text = tk.Text(frame, width=80, height=12, state="disabled", bg="#f8fafc", relief="flat", borderwidth=2)
-output_text.grid(row=9, column=0, columnspan=4, pady=5, sticky="ew")
-
 # Make columns expand equally for centering
 for i in range(4):
     frame.grid_columnconfigure(i, weight=1)
-
-def set_output_text(text):
-    output_text.config(state="normal")
-    output_text.delete(1.0, tk.END)
-    output_text.insert(tk.END, text)
-    output_text.config(state="disabled")
 
 root.mainloop()
