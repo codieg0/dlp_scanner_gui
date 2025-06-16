@@ -183,6 +183,8 @@ except Exception as e:
 
 # Store a mapping from displayed name to full path
 file_display_to_path = {}
+# Store the full path of the selected dictionary file (for internal use)
+dict_full_path = None
 
 def select_files():
     global file_display_to_path
@@ -195,8 +197,11 @@ def select_files():
         file_display_to_path[fname] = f
 
 def select_dict_file():
+    global dict_full_path
     path = filedialog.askopenfilename(title="Select dictionary JSON file", filetypes=[("JSON files", "*.json")])
-    dict_path_var.set(path)
+    if path:
+        dict_full_path = path  # Store the full path for internal use
+        dict_path_var.set(os.path.basename(path))  # Show only the filename in the entry
 
 # Add a logo/banner (optional: replace 'logo.png' with your image file)
 try:
@@ -314,7 +319,8 @@ def run_scan():
     if var_cc.get(): scan_options.append("Credit Card")
     if var_dl.get(): scan_options.append("US Driver License")
     dict_terms = None
-    dlp_dict_path = dict_path_var.get() if var_dict.get() else None
+    # Use the full path for scanning
+    dlp_dict_path = dict_full_path if var_dict.get() else None
     if var_dict.get():
         scan_options.append("Dictionary")
         if not dlp_dict_path:
